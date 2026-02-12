@@ -1,0 +1,758 @@
+# ============================================================================
+# Reusable Architecture Review Workflow
+#
+# Host this in: harnessthespark/.github/.github/workflows/arch-review.yml
+#
+# Call from any repo with:
+#   jobs:
+#     review:
+#       uses: harnessthespark/.github/.github/workflows/arch-review.yml@main
+# ============================================================================
+name: Architecture Review
+
+on:
+  workflow_call:
+    inputs:
+      node-version:
+        description: 'Node.js version'
+        required: false
+        type: string
+        default: '20'
+      python-version:
+        description: 'Python version'
+        required: false
+        type: string
+        default: '3.12'
+      skip-build:
+        description: 'Skip build step'
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  # ── Detect project structure ───────────────────────────────────────────
+  detect-stack:
+    name: Detect stack
+    runs-on: ubuntu-latest
+    outputs:
+      has_root_node: ${{ steps.detect.outputs.has_root_node }}
+      has_frontend_node: ${{ steps.detect.outputs.has_frontend_node }}
+      has_root_python: ${{ steps.detect.outputs.has_root_python }}
+      has_backend_python: ${{ steps.detect.outputs.has_backend_python }}
+      has_django: ${{ steps.detect.outputs.has_django }}
+      has_mobile: ${{ steps.detect.outputs.has_mobile }}
+      has_maestro_flows: ${{ steps.detect.outputs.has_maestro_flows }}
+      has_storybook: ${{ steps.detect.outputs.has_storybook }}
+      has_rust: ${{ steps.detect.outputs.has_rust }}
+      has_go: ${{ steps.detect.outputs.has_go }}
+      has_dockerfile: ${{ steps.detect.outputs.has_dockerfile }}
+      has_env_template: ${{ steps.detect.outputs.has_env_template }}
+      storybook_dirs: ${{ steps.detect.outputs.storybook_dirs }}
+      mobile_dirs: ${{ steps.detect.outputs.mobile_dirs }}
+      node_dirs: ${{ steps.detect.outputs.node_dirs }}
+      python_dirs: ${{ steps.detect.outputs.python_dirs }}
+      rust_dirs: ${{ steps.detect.outputs.rust_dirs }}
+      go_dirs: ${{ steps.detect.outputs.go_dirs }}
+      dockerfile_dirs: ${{ steps.detect.outputs.dockerfile_dirs }}
+      env_template_dirs: ${{ steps.detect.outputs.env_template_dirs }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Detect project types
+        id: detect
+        run: |
+          # Node.js detection
+          if [[ -f package.json ]]; then
+            echo "has_root_node=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_root_node=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          if [[ -f frontend/package.json ]]; then
+            echo "has_frontend_node=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_frontend_node=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          # Python detection
+          if [[ -f requirements.txt ]] || [[ -f pyproject.toml ]]; then
+            echo "has_root_python=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_root_python=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          if [[ -f backend/requirements.txt ]] || [[ -f backend/pyproject.toml ]]; then
+            echo "has_backend_python=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_backend_python=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          # Django detection
+          if [[ -f manage.py ]] || [[ -f backend/manage.py ]]; then
+            echo "has_django=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_django=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          # Build directory lists for matrix
+          NODE_DIRS='[]'
+          [[ -f package.json ]] && NODE_DIRS=$(echo "$NODE_DIRS" | jq '. + ["."]')
+          [[ -f frontend/package.json ]] && NODE_DIRS=$(echo "$NODE_DIRS" | jq '. + ["frontend"]')
+          echo "node_dirs=$NODE_DIRS" >> "$GITHUB_OUTPUT"
+
+          PYTHON_DIRS='[]'
+          [[ -f requirements.txt ]] && PYTHON_DIRS=$(echo "$PYTHON_DIRS" | jq '. + ["."]')
+          [[ -f backend/requirements.txt ]] && PYTHON_DIRS=$(echo "$PYTHON_DIRS" | jq '. + ["backend"]')
+          echo "python_dirs=$PYTHON_DIRS" >> "$GITHUB_OUTPUT"
+
+          # Rust detection
+          HAS_RUST=false
+          RUST_DIRS='[]'
+          for dir in . backend; do
+            if [[ -f "$dir/Cargo.toml" ]]; then
+              HAS_RUST=true
+              RUST_DIRS=$(echo "$RUST_DIRS" | jq --arg d "$dir" '. + [$d]')
+            fi
+          done
+          echo "has_rust=$HAS_RUST" >> "$GITHUB_OUTPUT"
+          echo "rust_dirs=$RUST_DIRS" >> "$GITHUB_OUTPUT"
+
+          # Go detection
+          HAS_GO=false
+          GO_DIRS='[]'
+          for dir in . backend; do
+            if [[ -f "$dir/go.mod" ]]; then
+              HAS_GO=true
+              GO_DIRS=$(echo "$GO_DIRS" | jq --arg d "$dir" '. + [$d]')
+            fi
+          done
+          echo "has_go=$HAS_GO" >> "$GITHUB_OUTPUT"
+          echo "go_dirs=$GO_DIRS" >> "$GITHUB_OUTPUT"
+
+          # Mobile detection (Capacitor, Expo, React Native, Flutter)
+          HAS_MOBILE=false
+          MOBILE_DIRS='[]'
+
+          for dir in . mobile sparkhub-fe frontend; do
+            if [[ -f "$dir/capacitor.config.ts" ]] || [[ -f "$dir/capacitor.config.json" ]]; then
+              HAS_MOBILE=true
+              MOBILE_DIRS=$(echo "$MOBILE_DIRS" | jq --arg d "$dir" '. + [$d]')
+            elif [[ -f "$dir/app.json" ]] && node -e "const a=require('./$dir/app.json'); process.exit(a.expo ? 0 : 1)" 2>/dev/null; then
+              HAS_MOBILE=true
+              MOBILE_DIRS=$(echo "$MOBILE_DIRS" | jq --arg d "$dir" '. + [$d]')
+            elif [[ -f "$dir/pubspec.yaml" ]]; then
+              HAS_MOBILE=true
+              MOBILE_DIRS=$(echo "$MOBILE_DIRS" | jq --arg d "$dir" '. + [$d]')
+            fi
+          done
+
+          echo "has_mobile=$HAS_MOBILE" >> "$GITHUB_OUTPUT"
+          echo "mobile_dirs=$MOBILE_DIRS" >> "$GITHUB_OUTPUT"
+
+          # Check for Maestro flows
+          HAS_MAESTRO=false
+          for dir in .maestro mobile/.maestro sparkhub-fe/.maestro frontend/.maestro; do
+            if [[ -d "$dir" ]]; then
+              HAS_MAESTRO=true
+              break
+            fi
+          done
+          echo "has_maestro_flows=$HAS_MAESTRO" >> "$GITHUB_OUTPUT"
+
+          # Storybook detection — look for .storybook/ config dir
+          HAS_STORYBOOK=false
+          STORYBOOK_DIRS='[]'
+          for dir in . frontend sparkhub-fe; do
+            if [[ -d "$dir/.storybook" ]]; then
+              HAS_STORYBOOK=true
+              STORYBOOK_DIRS=$(echo "$STORYBOOK_DIRS" | jq --arg d "$dir" '. + [$d]')
+            fi
+          done
+          echo "has_storybook=$HAS_STORYBOOK" >> "$GITHUB_OUTPUT"
+          echo "storybook_dirs=$STORYBOOK_DIRS" >> "$GITHUB_OUTPUT"
+
+          # Dockerfile detection
+          HAS_DOCKERFILE=false
+          DOCKERFILE_DIRS='[]'
+          for dir in . frontend backend; do
+            if [[ -f "$dir/Dockerfile" ]]; then
+              HAS_DOCKERFILE=true
+              DOCKERFILE_DIRS=$(echo "$DOCKERFILE_DIRS" | jq --arg d "$dir" '. + [$d]')
+            fi
+          done
+          echo "has_dockerfile=$HAS_DOCKERFILE" >> "$GITHUB_OUTPUT"
+          echo "dockerfile_dirs=$DOCKERFILE_DIRS" >> "$GITHUB_OUTPUT"
+
+          # Env template detection
+          HAS_ENV_TEMPLATE=false
+          ENV_TEMPLATE_DIRS='[]'
+          for dir in . frontend backend; do
+            if [[ -f "$dir/.env.example" ]] || [[ -f "$dir/.env.template" ]] || [[ -f "$dir/.env.sample" ]]; then
+              HAS_ENV_TEMPLATE=true
+              ENV_TEMPLATE_DIRS=$(echo "$ENV_TEMPLATE_DIRS" | jq --arg d "$dir" '. + [$d]')
+            fi
+          done
+          echo "has_env_template=$HAS_ENV_TEMPLATE" >> "$GITHUB_OUTPUT"
+          echo "env_template_dirs=$ENV_TEMPLATE_DIRS" >> "$GITHUB_OUTPUT"
+
+  # ── Node.js Audit ──────────────────────────────────────────────────────
+  node-audit:
+    name: "Node audit (${{ matrix.dir }})"
+    needs: detect-stack
+    if: needs.detect-stack.outputs.node_dirs != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        dir: ${{ fromJSON(needs.detect-stack.outputs.node_dirs) }}
+    defaults:
+      run:
+        working-directory: ${{ matrix.dir }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: npm
+          cache-dependency-path: ${{ matrix.dir }}/package-lock.json
+
+      - name: Install
+        run: |
+          if [[ -f package-lock.json ]]; then
+            npm ci
+          else
+            npm install
+          fi
+
+      - name: Lint
+        run: |
+          if npm run lint --if-present 2>/dev/null; then
+            echo "Lint passed"
+          else
+            echo "::warning::Lint issues found"
+          fi
+
+      - name: Typecheck
+        run: |
+          if node -e "const p=require('./package.json'); process.exit(p.scripts && p.scripts.typecheck ? 0 : 1)" 2>/dev/null; then
+            npm run typecheck
+          else
+            echo "No typecheck script found, skipping"
+          fi
+
+      - name: Tests
+        run: |
+          if node -e "const p=require('./package.json'); process.exit(p.scripts && p.scripts.test ? 0 : 1)" 2>/dev/null; then
+            npm test
+          else
+            echo "::warning::No test script found"
+          fi
+
+      - name: Dependency audit
+        run: npm audit --omit=dev || echo "::warning::npm audit found vulnerabilities"
+
+      - name: Build
+        if: ${{ !inputs.skip-build }}
+        run: |
+          if node -e "const p=require('./package.json'); process.exit(p.scripts && p.scripts.build ? 0 : 1)" 2>/dev/null; then
+            npm run build
+          else
+            echo "No build script found, skipping"
+          fi
+
+      - name: Dead code detection (knip)
+        run: |
+          npx knip --no-exit-code 2>&1 || echo "::warning::knip found unused exports/dependencies"
+
+      - name: License compliance
+        run: |
+          npx license-checker --production --failOn 'GPL-2.0;GPL-3.0;AGPL-1.0;AGPL-3.0' --summary || echo "::warning::License compliance issues found"
+
+      - name: Bundle size analysis
+        if: ${{ !inputs.skip-build }}
+        run: |
+          BUILD_DIR=""
+          [[ -d .next ]] && BUILD_DIR=".next"
+          [[ -d dist ]] && BUILD_DIR="dist"
+          [[ -d build ]] && BUILD_DIR="build"
+          if [[ -n "$BUILD_DIR" ]]; then
+            echo "## Bundle Size" >> "$GITHUB_STEP_SUMMARY"
+            du -sh "$BUILD_DIR" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            # List largest files
+            echo "### Largest files" >> "$GITHUB_STEP_SUMMARY"
+            find "$BUILD_DIR" -type f -name '*.js' -o -name '*.css' | xargs du -sh 2>/dev/null | sort -rh | head -10 >> "$GITHUB_STEP_SUMMARY" || true
+          fi
+
+      - name: Lighthouse CI
+        if: ${{ !inputs.skip-build }}
+        run: |
+          if node -e "const p=require('./package.json'); process.exit(p.scripts && p.scripts.build ? 0 : 1)" 2>/dev/null; then
+            npm install -g @lhci/cli 2>/dev/null || true
+            if command -v lhci &>/dev/null; then
+              lhci autorun --collect.staticDistDir=.next --collect.numberOfRuns=1 2>&1 || echo "::warning::Lighthouse CI issues found"
+            else
+              echo "Lighthouse CI not available, skipping"
+            fi
+          fi
+
+      - name: Broken link check
+        run: |
+          BUILD_DIR=""
+          [[ -d .next ]] && BUILD_DIR=".next"
+          [[ -d dist ]] && BUILD_DIR="dist"
+          if [[ -n "$BUILD_DIR" ]]; then
+            npx linkinator "$BUILD_DIR" --recurse --skip 'mailto:' --format csv 2>&1 | head -50 || echo "::warning::Broken links found"
+          else
+            echo "No build output found, skipping broken link check"
+          fi
+
+  # ── Storybook Build ────────────────────────────────────────────────────
+  storybook-build:
+    name: "Storybook (${{ matrix.dir }})"
+    needs: detect-stack
+    if: needs.detect-stack.outputs.has_storybook == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        dir: ${{ fromJSON(needs.detect-stack.outputs.storybook_dirs) }}
+    defaults:
+      run:
+        working-directory: ${{ matrix.dir }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: npm
+          cache-dependency-path: ${{ matrix.dir }}/package-lock.json
+
+      - name: Install
+        run: |
+          if [[ -f package-lock.json ]]; then
+            npm ci
+          else
+            npm install
+          fi
+
+      - name: Build Storybook
+        run: |
+          if node -e "const p=require('./package.json'); process.exit(p.scripts && p.scripts['build-storybook'] ? 0 : 1)" 2>/dev/null; then
+            npm run build-storybook
+          else
+            npx storybook build
+          fi
+
+      - name: Run Storybook tests
+        run: |
+          if node -e "const p=require('./package.json'); process.exit(p.scripts && p.scripts['test-storybook'] ? 0 : 1)" 2>/dev/null; then
+            npm run test-storybook || echo "::warning::Storybook tests failed"
+          else
+            echo "No test-storybook script found, skipping interaction tests"
+          fi
+
+      - name: Upload Storybook build
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: storybook-${{ matrix.dir }}
+          path: ${{ matrix.dir }}/storybook-static/
+          if-no-files-found: ignore
+
+  # ── Python Audit ───────────────────────────────────────────────────────
+  python-audit:
+    name: "Python audit (${{ matrix.dir }})"
+    needs: detect-stack
+    if: needs.detect-stack.outputs.python_dirs != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        dir: ${{ fromJSON(needs.detect-stack.outputs.python_dirs) }}
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: testuser
+          POSTGRES_PASSWORD: testpass
+          POSTGRES_DB: testdb
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgres://testuser:testpass@localhost:5432/testdb
+      SECRET_KEY: test-secret-key-for-ci-review
+      DEBUG: "false"
+      ALLOWED_HOSTS: "*"
+    defaults:
+      run:
+        working-directory: ${{ matrix.dir }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python-version }}
+
+      - name: Install dependencies
+        run: |
+          if [[ -f requirements.txt ]]; then
+            pip install -r requirements.txt
+          fi
+          if [[ -f requirements-dev.txt ]]; then
+            pip install -r requirements-dev.txt
+          fi
+          pip install ruff pip-audit
+
+      - name: Ruff lint
+        run: |
+          ruff check . || echo "::warning::Ruff found lint issues"
+
+      - name: Ruff format check
+        run: |
+          ruff format --check . || echo "::warning::Ruff found formatting issues"
+
+      - name: Django checks
+        if: needs.detect-stack.outputs.has_django == 'true'
+        run: |
+          if [[ -f manage.py ]]; then
+            python manage.py migrate --run-syncdb 2>/dev/null || true
+            python manage.py check || echo "::warning::Django check found issues"
+          fi
+        env:
+          DJANGO_SETTINGS_MODULE: config.settings
+
+      - name: Django migration linter
+        if: needs.detect-stack.outputs.has_django == 'true'
+        run: |
+          if [[ -f manage.py ]]; then
+            pip install django-migration-linter 2>/dev/null || true
+            python manage.py lintmigrations --no-cache 2>&1 || echo "::warning::Migration linter found issues"
+          fi
+        env:
+          DJANGO_SETTINGS_MODULE: config.settings
+
+      - name: Tests
+        run: |
+          if pip show pytest &>/dev/null; then
+            pytest --tb=short -q || echo "::warning::Some tests failed"
+          else
+            echo "::warning::pytest not installed, skipping tests"
+          fi
+
+      - name: Dependency audit
+        run: |
+          if [[ -f requirements.txt ]]; then
+            pip-audit -r requirements.txt || echo "::warning::pip-audit found vulnerabilities"
+          fi
+
+      - name: Dead code detection (vulture)
+        run: |
+          pip install vulture 2>/dev/null || true
+          vulture . --min-confidence 80 2>&1 || echo "::warning::vulture found potential dead code"
+
+      - name: License compliance
+        run: |
+          pip install pip-licenses 2>/dev/null || true
+          pip-licenses --fail-on='GPL-2.0;GPL-3.0;AGPL-1.0;AGPL-3.0' --format=plain 2>&1 || echo "::warning::License compliance issues found"
+
+  # ── Rust Audit ─────────────────────────────────────────────────────────
+  rust-audit:
+    name: "Rust audit (${{ matrix.dir }})"
+    needs: detect-stack
+    if: needs.detect-stack.outputs.has_rust == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        dir: ${{ fromJSON(needs.detect-stack.outputs.rust_dirs) }}
+    defaults:
+      run:
+        working-directory: ${{ matrix.dir }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Build
+        run: cargo build 2>&1
+
+      - name: Clippy lint
+        run: cargo clippy -- -D warnings 2>&1 || echo "::warning::Clippy found lint issues"
+
+      - name: Format check
+        run: cargo fmt -- --check 2>&1 || echo "::warning::rustfmt found formatting issues"
+
+      - name: Tests
+        run: cargo test 2>&1 || echo "::warning::Some tests failed"
+
+      - name: Security audit
+        run: |
+          cargo install cargo-audit 2>/dev/null || true
+          if command -v cargo-audit &>/dev/null; then
+            cargo audit 2>&1 || echo "::warning::cargo audit found vulnerabilities"
+          else
+            echo "cargo-audit not available, skipping"
+          fi
+
+  # ── Go Audit ──────────────────────────────────────────────────────────
+  go-audit:
+    name: "Go audit (${{ matrix.dir }})"
+    needs: detect-stack
+    if: needs.detect-stack.outputs.has_go == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        dir: ${{ fromJSON(needs.detect-stack.outputs.go_dirs) }}
+    defaults:
+      run:
+        working-directory: ${{ matrix.dir }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: 'stable'
+
+      - name: Build
+        run: go build ./... 2>&1
+
+      - name: Vet
+        run: go vet ./... 2>&1 || echo "::warning::go vet found issues"
+
+      - name: Staticcheck
+        run: |
+          go install honnef.co/go/tools/cmd/staticcheck@latest 2>/dev/null || true
+          if command -v staticcheck &>/dev/null; then
+            staticcheck ./... 2>&1 || echo "::warning::staticcheck found issues"
+          else
+            echo "staticcheck not available, skipping"
+          fi
+
+      - name: Tests
+        run: go test ./... 2>&1 || echo "::warning::Some tests failed"
+
+      - name: Vulnerability check
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest 2>/dev/null || true
+          if command -v govulncheck &>/dev/null; then
+            govulncheck ./... 2>&1 || echo "::warning::govulncheck found vulnerabilities"
+          else
+            echo "govulncheck not available, skipping"
+          fi
+
+  # ── Maestro Mobile Tests ────────────────────────────────────────────────
+  maestro-test:
+    name: "Maestro E2E (${{ matrix.dir }})"
+    needs: detect-stack
+    if: needs.detect-stack.outputs.has_maestro_flows == 'true'
+    runs-on: macos-latest  # Maestro needs macOS for iOS simulator
+    strategy:
+      fail-fast: false
+      matrix:
+        dir: ${{ fromJSON(needs.detect-stack.outputs.mobile_dirs) }}
+    defaults:
+      run:
+        working-directory: ${{ matrix.dir }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+
+      - name: Install Maestro
+        run: |
+          curl -Ls https://get.maestro.mobile.dev | bash
+          echo "$HOME/.maestro/bin" >> "$GITHUB_PATH"
+
+      - name: Install app dependencies
+        run: |
+          if [[ -f package-lock.json ]]; then
+            npm ci
+          elif [[ -f package.json ]]; then
+            npm install
+          fi
+
+      - name: Detect mobile framework
+        id: framework
+        run: |
+          if [[ -f capacitor.config.ts ]] || [[ -f capacitor.config.json ]]; then
+            echo "type=capacitor" >> "$GITHUB_OUTPUT"
+          elif [[ -f app.json ]] && node -e "process.exit(require('./app.json').expo ? 0 : 1)" 2>/dev/null; then
+            echo "type=expo" >> "$GITHUB_OUTPUT"
+          elif [[ -f pubspec.yaml ]]; then
+            echo "type=flutter" >> "$GITHUB_OUTPUT"
+          else
+            echo "type=unknown" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build app (Expo)
+        if: steps.framework.outputs.type == 'expo'
+        run: |
+          npx expo install expo-dev-client 2>/dev/null || true
+          npx expo export --platform ios 2>/dev/null || echo "::warning::Expo export failed"
+
+      - name: Build app (Capacitor)
+        if: steps.framework.outputs.type == 'capacitor'
+        run: |
+          npm run build 2>/dev/null || true
+          npx cap sync ios 2>/dev/null || echo "::warning::Capacitor sync failed"
+
+      - name: Run Maestro tests
+        run: |
+          MAESTRO_DIR=""
+          for candidate in .maestro maestro e2e/maestro; do
+            if [[ -d "$candidate" ]]; then
+              MAESTRO_DIR="$candidate"
+              break
+            fi
+          done
+
+          if [[ -n "$MAESTRO_DIR" ]]; then
+            maestro test "$MAESTRO_DIR" || echo "::warning::Some Maestro tests failed"
+          else
+            echo "::warning::No .maestro/ directory found in ${{ matrix.dir }}"
+          fi
+
+      - name: Upload Maestro screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: maestro-screenshots-${{ matrix.dir }}
+          path: |
+            ${{ matrix.dir }}/.maestro/screenshots/
+            ~/.maestro/tests/
+          if-no-files-found: ignore
+
+  # ── Docker Build Validation ────────────────────────────────────────────
+  docker-build:
+    name: "Docker build (${{ matrix.dir }})"
+    needs: detect-stack
+    if: needs.detect-stack.outputs.has_dockerfile == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        dir: ${{ fromJSON(needs.detect-stack.outputs.dockerfile_dirs) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: |
+          docker build --no-cache -f ${{ matrix.dir }}/Dockerfile -t arch-review-test:${{ matrix.dir }} ${{ matrix.dir }} || echo "::warning::Docker build failed for ${{ matrix.dir }}"
+
+      - name: Scan Docker image (trivy)
+        run: |
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            aquasec/trivy:latest image \
+            --severity HIGH,CRITICAL \
+            --exit-code 0 \
+            arch-review-test:${{ matrix.dir }} 2>&1 || echo "::warning::Trivy scan found vulnerabilities"
+
+      - name: Cleanup
+        if: always()
+        run: docker rmi arch-review-test:${{ matrix.dir }} 2>/dev/null || true
+
+  # ── Env Var Validation ───────────────────────────────────────────────
+  env-validation:
+    name: "Env validation (${{ matrix.dir }})"
+    needs: detect-stack
+    if: needs.detect-stack.outputs.has_env_template == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        dir: ${{ fromJSON(needs.detect-stack.outputs.env_template_dirs) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate env template
+        run: |
+          cd ${{ matrix.dir }}
+
+          # Find the template file
+          TEMPLATE=""
+          [[ -f .env.example ]] && TEMPLATE=".env.example"
+          [[ -f .env.template ]] && TEMPLATE=".env.template"
+          [[ -f .env.sample ]] && TEMPLATE=".env.sample"
+
+          if [[ -z "$TEMPLATE" ]]; then
+            echo "No env template found"
+            exit 0
+          fi
+
+          echo "## Env Var Report (${{ matrix.dir }})" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          # Count defined vars
+          VARS=$(grep -oP '^[A-Z_][A-Z0-9_]*' "$TEMPLATE" 2>/dev/null | sort -u)
+          VAR_COUNT=$(echo "$VARS" | wc -l | tr -d ' ')
+          echo "Template: $TEMPLATE ($VAR_COUNT vars defined)" >> "$GITHUB_STEP_SUMMARY"
+
+          # Check for empty values (potential missing config)
+          EMPTY_VARS=$(grep -P '^[A-Z_][A-Z0-9_]*=$' "$TEMPLATE" 2>/dev/null | cut -d= -f1 || true)
+          if [[ -n "$EMPTY_VARS" ]]; then
+            EMPTY_COUNT=$(echo "$EMPTY_VARS" | wc -l | tr -d ' ')
+            echo "::warning::$EMPTY_COUNT vars have empty defaults in $TEMPLATE"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "Vars with empty defaults:" >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+            echo "$EMPTY_VARS" >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  # ── Security Scan ──────────────────────────────────────────────────────
+  security-scan:
+    name: Security scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Scan for secrets (gitleaks)
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ── Report ─────────────────────────────────────────────────────────────
+  report:
+    name: Generate report
+    needs: [detect-stack, node-audit, storybook-build, python-audit, rust-audit, go-audit, maestro-test, docker-build, env-validation, security-scan]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Summary
+        env:
+          NODE_RESULT: ${{ needs.node-audit.result || 'skipped' }}
+          STORYBOOK_RESULT: ${{ needs.storybook-build.result || 'skipped' }}
+          PYTHON_RESULT: ${{ needs.python-audit.result || 'skipped' }}
+          RUST_RESULT: ${{ needs.rust-audit.result || 'skipped' }}
+          GO_RESULT: ${{ needs.go-audit.result || 'skipped' }}
+          MAESTRO_RESULT: ${{ needs.maestro-test.result || 'skipped' }}
+          DOCKER_RESULT: ${{ needs.docker-build.result || 'skipped' }}
+          ENV_RESULT: ${{ needs.env-validation.result || 'skipped' }}
+          SECURITY_RESULT: ${{ needs.security-scan.result || 'skipped' }}
+        run: |
+          echo "## Architecture Review Results" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Job | Status |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|-----|--------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| node-audit | $NODE_RESULT |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| storybook-build | $STORYBOOK_RESULT |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| python-audit | $PYTHON_RESULT |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| rust-audit | $RUST_RESULT |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| go-audit | $GO_RESULT |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| maestro-test | $MAESTRO_RESULT |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| docker-build | $DOCKER_RESULT |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| env-validation | $ENV_RESULT |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| security-scan | $SECURITY_RESULT |" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Generated: $(date -u '+%Y-%m-%d %H:%M UTC')" >> "$GITHUB_STEP_SUMMARY"
