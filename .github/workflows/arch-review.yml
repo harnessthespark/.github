@@ -95,13 +95,13 @@ jobs:
 
           # Build directory lists for matrix
           NODE_DIRS='[]'
-          [[ -f package.json ]] && NODE_DIRS=$(echo "$NODE_DIRS" | jq '. + ["."]')
-          [[ -f frontend/package.json ]] && NODE_DIRS=$(echo "$NODE_DIRS" | jq '. + ["frontend"]')
+          [[ -f package.json ]] && NODE_DIRS=$(echo "$NODE_DIRS" | jq -c '. + ["."]')
+          [[ -f frontend/package.json ]] && NODE_DIRS=$(echo "$NODE_DIRS" | jq -c '. + ["frontend"]')
           echo "node_dirs=$NODE_DIRS" >> "$GITHUB_OUTPUT"
 
           PYTHON_DIRS='[]'
-          [[ -f requirements.txt ]] && PYTHON_DIRS=$(echo "$PYTHON_DIRS" | jq '. + ["."]')
-          [[ -f backend/requirements.txt ]] && PYTHON_DIRS=$(echo "$PYTHON_DIRS" | jq '. + ["backend"]')
+          [[ -f requirements.txt ]] && PYTHON_DIRS=$(echo "$PYTHON_DIRS" | jq -c '. + ["."]')
+          [[ -f backend/requirements.txt ]] && PYTHON_DIRS=$(echo "$PYTHON_DIRS" | jq -c '. + ["backend"]')
           echo "python_dirs=$PYTHON_DIRS" >> "$GITHUB_OUTPUT"
 
           # Rust detection
@@ -110,7 +110,7 @@ jobs:
           for dir in . backend; do
             if [[ -f "$dir/Cargo.toml" ]]; then
               HAS_RUST=true
-              RUST_DIRS=$(echo "$RUST_DIRS" | jq --arg d "$dir" '. + [$d]')
+              RUST_DIRS=$(echo "$RUST_DIRS" | jq -c --arg d "$dir" '. + [$d]')
             fi
           done
           echo "has_rust=$HAS_RUST" >> "$GITHUB_OUTPUT"
@@ -122,7 +122,7 @@ jobs:
           for dir in . backend; do
             if [[ -f "$dir/go.mod" ]]; then
               HAS_GO=true
-              GO_DIRS=$(echo "$GO_DIRS" | jq --arg d "$dir" '. + [$d]')
+              GO_DIRS=$(echo "$GO_DIRS" | jq -c --arg d "$dir" '. + [$d]')
             fi
           done
           echo "has_go=$HAS_GO" >> "$GITHUB_OUTPUT"
@@ -135,13 +135,13 @@ jobs:
           for dir in . mobile sparkhub-fe frontend; do
             if [[ -f "$dir/capacitor.config.ts" ]] || [[ -f "$dir/capacitor.config.json" ]]; then
               HAS_MOBILE=true
-              MOBILE_DIRS=$(echo "$MOBILE_DIRS" | jq --arg d "$dir" '. + [$d]')
+              MOBILE_DIRS=$(echo "$MOBILE_DIRS" | jq -c --arg d "$dir" '. + [$d]')
             elif [[ -f "$dir/app.json" ]] && node -e "const a=require('./$dir/app.json'); process.exit(a.expo ? 0 : 1)" 2>/dev/null; then
               HAS_MOBILE=true
-              MOBILE_DIRS=$(echo "$MOBILE_DIRS" | jq --arg d "$dir" '. + [$d]')
+              MOBILE_DIRS=$(echo "$MOBILE_DIRS" | jq -c --arg d "$dir" '. + [$d]')
             elif [[ -f "$dir/pubspec.yaml" ]]; then
               HAS_MOBILE=true
-              MOBILE_DIRS=$(echo "$MOBILE_DIRS" | jq --arg d "$dir" '. + [$d]')
+              MOBILE_DIRS=$(echo "$MOBILE_DIRS" | jq -c --arg d "$dir" '. + [$d]')
             fi
           done
 
@@ -164,7 +164,7 @@ jobs:
           for dir in . frontend sparkhub-fe; do
             if [[ -d "$dir/.storybook" ]]; then
               HAS_STORYBOOK=true
-              STORYBOOK_DIRS=$(echo "$STORYBOOK_DIRS" | jq --arg d "$dir" '. + [$d]')
+              STORYBOOK_DIRS=$(echo "$STORYBOOK_DIRS" | jq -c --arg d "$dir" '. + [$d]')
             fi
           done
           echo "has_storybook=$HAS_STORYBOOK" >> "$GITHUB_OUTPUT"
@@ -176,7 +176,7 @@ jobs:
           for dir in . frontend backend; do
             if [[ -f "$dir/Dockerfile" ]]; then
               HAS_DOCKERFILE=true
-              DOCKERFILE_DIRS=$(echo "$DOCKERFILE_DIRS" | jq --arg d "$dir" '. + [$d]')
+              DOCKERFILE_DIRS=$(echo "$DOCKERFILE_DIRS" | jq -c --arg d "$dir" '. + [$d]')
             fi
           done
           echo "has_dockerfile=$HAS_DOCKERFILE" >> "$GITHUB_OUTPUT"
@@ -188,7 +188,7 @@ jobs:
           for dir in . frontend backend; do
             if [[ -f "$dir/.env.example" ]] || [[ -f "$dir/.env.template" ]] || [[ -f "$dir/.env.sample" ]]; then
               HAS_ENV_TEMPLATE=true
-              ENV_TEMPLATE_DIRS=$(echo "$ENV_TEMPLATE_DIRS" | jq --arg d "$dir" '. + [$d]')
+              ENV_TEMPLATE_DIRS=$(echo "$ENV_TEMPLATE_DIRS" | jq -c --arg d "$dir" '. + [$d]')
             fi
           done
           echo "has_env_template=$HAS_ENV_TEMPLATE" >> "$GITHUB_OUTPUT"
@@ -721,6 +721,7 @@ jobs:
         uses: gitleaks/gitleaks-action@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_ENABLE_UPLOAD: "false"
 
   # ── Report ─────────────────────────────────────────────────────────────
   report:
