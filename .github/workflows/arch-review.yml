@@ -7,6 +7,9 @@
 #   jobs:
 #     review:
 #       uses: harnessthespark/.github/.github/workflows/arch-review.yml@main
+#
+# Architectural rule:
+#   No hardcoded fallbacks — all configuration comes from PostgreSQL.
 # ============================================================================
 name: Architecture Review
 
@@ -45,8 +48,10 @@ jobs:
       has_storybook: ${{ steps.detect.outputs.has_storybook }}
       has_rust: ${{ steps.detect.outputs.has_rust }}
       has_go: ${{ steps.detect.outputs.has_go }}
+      has_playwright: ${{ steps.detect.outputs.has_playwright }}
       has_dockerfile: ${{ steps.detect.outputs.has_dockerfile }}
       has_env_template: ${{ steps.detect.outputs.has_env_template }}
+      playwright_dirs: ${{ steps.detect.outputs.playwright_dirs }}
       storybook_dirs: ${{ steps.detect.outputs.storybook_dirs }}
       mobile_dirs: ${{ steps.detect.outputs.mobile_dirs }}
       node_dirs: ${{ steps.detect.outputs.node_dirs }}
@@ -169,6 +174,18 @@ jobs:
           done
           echo "has_storybook=$HAS_STORYBOOK" >> "$GITHUB_OUTPUT"
           echo "storybook_dirs=$STORYBOOK_DIRS" >> "$GITHUB_OUTPUT"
+
+          # Playwright detection — look for playwright.config.ts or .js
+          HAS_PLAYWRIGHT=false
+          PLAYWRIGHT_DIRS='[]'
+          for dir in . frontend sparkhub-fe; do
+            if [[ -f "$dir/playwright.config.ts" ]] || [[ -f "$dir/playwright.config.js" ]]; then
+              HAS_PLAYWRIGHT=true
+              PLAYWRIGHT_DIRS=$(echo "$PLAYWRIGHT_DIRS" | jq -c --arg d "$dir" '. + [$d]')
+            fi
+          done
+          echo "has_playwright=$HAS_PLAYWRIGHT" >> "$GITHUB_OUTPUT"
+          echo "playwright_dirs=$PLAYWRIGHT_DIRS" >> "$GITHUB_OUTPUT"
 
           # Dockerfile detection
           HAS_DOCKERFILE=false
@@ -357,6 +374,52 @@ jobs:
         with:
           name: storybook-${{ matrix.dir }}
           path: ${{ matrix.dir }}/storybook-static/
+          if-no-files-found: ignore
+
+  # ── Playwright E2E & Accessibility ────────────────────────────────────
+  playwright-test:
+    name: "Playwright (${{ matrix.dir }})"
+    needs: detect-stack
+    if: needs.detect-stack.outputs.has_playwright == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        dir: ${{ fromJSON(needs.detect-stack.outputs.playwright_dirs) }}
+    defaults:
+      run:
+        working-directory: ${{ matrix.dir }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: npm
+          cache-dependency-path: ${{ matrix.dir }}/package-lock.json
+
+      - name: Install
+        run: |
+          if [[ -f package-lock.json ]]; then
+            npm ci
+          else
+            npm install
+          fi
+
+      - name: Install Chromium
+        run: npx playwright install chromium --with-deps
+
+      - name: Run Playwright tests
+        run: npx playwright test
+
+      - name: Upload Playwright report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report-${{ matrix.dir }}
+          path: |
+            ${{ matrix.dir }}/playwright-report/
+            ${{ matrix.dir }}/test-results/
+          retention-days: 14
           if-no-files-found: ignore
 
   # ── Python Audit ───────────────────────────────────────────────────────
@@ -726,7 +789,7 @@ jobs:
   # ── Report ─────────────────────────────────────────────────────────────
   report:
     name: Generate report
-    needs: [detect-stack, node-audit, storybook-build, python-audit, rust-audit, go-audit, maestro-test, docker-build, env-validation, security-scan]
+    needs: [detect-stack, node-audit, storybook-build, playwright-test, python-audit, rust-audit, go-audit, maestro-test, docker-build, env-validation, security-scan]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -734,6 +797,7 @@ jobs:
         env:
           NODE_RESULT: ${{ needs.node-audit.result || 'skipped' }}
           STORYBOOK_RESULT: ${{ needs.storybook-build.result || 'skipped' }}
+          PLAYWRIGHT_RESULT: ${{ needs.playwright-test.result || 'skipped' }}
           PYTHON_RESULT: ${{ needs.python-audit.result || 'skipped' }}
           RUST_RESULT: ${{ needs.rust-audit.result || 'skipped' }}
           GO_RESULT: ${{ needs.go-audit.result || 'skipped' }}
@@ -748,6 +812,7 @@ jobs:
           echo "|-----|--------|" >> "$GITHUB_STEP_SUMMARY"
           echo "| node-audit | $NODE_RESULT |" >> "$GITHUB_STEP_SUMMARY"
           echo "| storybook-build | $STORYBOOK_RESULT |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| playwright-test | $PLAYWRIGHT_RESULT |" >> "$GITHUB_STEP_SUMMARY"
           echo "| python-audit | $PYTHON_RESULT |" >> "$GITHUB_STEP_SUMMARY"
           echo "| rust-audit | $RUST_RESULT |" >> "$GITHUB_STEP_SUMMARY"
           echo "| go-audit | $GO_RESULT |" >> "$GITHUB_STEP_SUMMARY"
