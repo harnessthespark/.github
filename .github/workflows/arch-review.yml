@@ -470,13 +470,22 @@ jobs:
           fi
           pip install ruff pip-audit
 
-      - name: Ruff lint
+      - name: Ruff fix (lint + format)
         run: |
-          ruff check . || echo "::warning::Ruff found lint issues"
+          ruff check --fix . || true
+          ruff format .
 
-      - name: Ruff format check
+      - name: Commit ruff fixes
         run: |
-          ruff format --check . || echo "::warning::Ruff found formatting issues"
+          if [[ -n "$(git status --porcelain)" ]]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add -A
+            git commit -m "style: auto-fix ruff lint and format issues"
+            git push
+          else
+            echo "No ruff fixes needed"
+          fi
 
       - name: Django checks
         if: needs.detect-stack.outputs.has_django == 'true'
