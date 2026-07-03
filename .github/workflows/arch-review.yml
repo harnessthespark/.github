@@ -4,6 +4,14 @@
 # Host this in: harnessthespark/.github/.github/workflows/arch-review.yml
 #
 # Call from any repo with:
+#   on:
+#     push: { branches: [main] }
+#     pull_request: { branches: [main] }
+#     schedule: [{ cron: '0 6 * * 1' }]
+#     workflow_dispatch:
+#   concurrency:
+#     group: arch-review-${{ github.ref }}
+#     cancel-in-progress: true
 #   jobs:
 #     review:
 #       uses: harnessthespark/.github/.github/workflows/arch-review.yml@main
@@ -31,6 +39,14 @@ on:
         required: false
         type: boolean
         default: false
+      run-maestro:
+        description: 'Run Maestro mobile E2E (macOS runners bill at 10x minutes)'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
 
 jobs:
   # ── Detect project structure ───────────────────────────────────────────
@@ -241,12 +257,7 @@ jobs:
           fi
 
       - name: Lint
-        run: |
-          if npm run lint --if-present 2>/dev/null; then
-            echo "Lint passed"
-          else
-            echo "::warning::Lint issues found"
-          fi
+        run: npm run lint --if-present || echo "::warning::Lint issues found"
 
       - name: Typecheck
         run: |
@@ -297,19 +308,7 @@ jobs:
             echo "" >> "$GITHUB_STEP_SUMMARY"
             # List largest files
             echo "### Largest files" >> "$GITHUB_STEP_SUMMARY"
-            find "$BUILD_DIR" -type f -name '*.js' -o -name '*.css' | xargs du -sh 2>/dev/null | sort -rh | head -10 >> "$GITHUB_STEP_SUMMARY" || true
-          fi
-
-      - name: Lighthouse CI
-        if: ${{ !inputs.skip-build }}
-        run: |
-          if node -e "const p=require('./package.json'); process.exit(p.scripts && p.scripts.build ? 0 : 1)" 2>/dev/null; then
-            npm install -g @lhci/cli 2>/dev/null || true
-            if command -v lhci &>/dev/null; then
-              lhci autorun --collect.staticDistDir=.next --collect.numberOfRuns=1 2>&1 || echo "::warning::Lighthouse CI issues found"
-            else
-              echo "Lighthouse CI not available, skipping"
-            fi
+            find "$BUILD_DIR" -type f \( -name '*.js' -o -name '*.css' \) | xargs du -sh 2>/dev/null | sort -rh | head -10 >> "$GITHUB_STEP_SUMMARY" || true
           fi
 
       - name: Broken link check
@@ -374,6 +373,7 @@ jobs:
         with:
           name: storybook-${{ matrix.dir }}
           path: ${{ matrix.dir }}/storybook-static/
+          retention-days: 3
           if-no-files-found: ignore
 
   # ── Playwright E2E & Accessibility ────────────────────────────────────
@@ -411,15 +411,17 @@ jobs:
       - name: Run Playwright tests
         run: npx playwright test
 
+      # Only keep reports from failed runs, briefly — routine uploads on every
+      # push exhausted the org's Actions artifact storage quota.
       - name: Upload Playwright report
-        if: always()
+        if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: playwright-report-${{ matrix.dir }}
           path: |
             ${{ matrix.dir }}/playwright-report/
             ${{ matrix.dir }}/test-results/
-          retention-days: 14
+          retention-days: 3
           if-no-files-found: ignore
 
   # ── Python Audit ───────────────────────────────────────────────────────
@@ -485,8 +487,6 @@ jobs:
             python manage.py migrate --run-syncdb 2>/dev/null || true
             python manage.py check || echo "::warning::Django check found issues"
           fi
-        env:
-          DJANGO_SETTINGS_MODULE: config.settings
 
       - name: Django migration linter
         if: needs.detect-stack.outputs.has_django == 'true'
@@ -495,8 +495,6 @@ jobs:
             pip install django-migration-linter 2>/dev/null || true
             python manage.py lintmigrations --no-cache 2>&1 || echo "::warning::Migration linter found issues"
           fi
-        env:
-          DJANGO_SETTINGS_MODULE: config.settings
 
       - name: Tests
         run: |
@@ -612,7 +610,9 @@ jobs:
   maestro-test:
     name: "Maestro E2E (${{ matrix.dir }})"
     needs: detect-stack
-    if: needs.detect-stack.outputs.has_maestro_flows == 'true'
+    # Opt-in via run-maestro input: macOS runners bill at 10x Linux minutes,
+    # and flows need a booted simulator + installed app to pass.
+    if: needs.detect-stack.outputs.has_maestro_flows == 'true' && inputs.run-maestro
     runs-on: macos-latest  # Maestro needs macOS for iOS simulator
     strategy:
       fail-fast: false
@@ -780,11 +780,14 @@ jobs:
         with:
           fetch-depth: 0
 
+      # Run the gitleaks binary directly: gitleaks-action@v2 tries to upload a
+      # SARIF artifact when it finds leaks and crashes if the org's artifact
+      # storage quota is hit, masking the actual finding.
       - name: Scan for secrets (gitleaks)
-        uses: gitleaks/gitleaks-action@v2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITLEAKS_ENABLE_UPLOAD: "false"
+        run: |
+          VERSION=8.24.3
+          curl -sSL "https://github.com/gitleaks/gitleaks/releases/download/v${VERSION}/gitleaks_${VERSION}_linux_x64.tar.gz" | tar -xz gitleaks
+          ./gitleaks detect --redact --verbose --exit-code=1
 
   # ── Report ─────────────────────────────────────────────────────────────
   report:
