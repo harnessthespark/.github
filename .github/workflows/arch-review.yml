@@ -15,6 +15,9 @@
 #   jobs:
 #     review:
 #       uses: harnessthespark/.github/.github/workflows/arch-review.yml@main
+#       with:
+#         # Playwright is the slowest job — run it on PRs/schedule/manual only:
+#         run-playwright: ${{ github.event_name != 'push' }}
 #
 # Architectural rule:
 #   No hardcoded fallbacks — all configuration comes from PostgreSQL.
@@ -44,6 +47,11 @@ on:
         required: false
         type: boolean
         default: false
+      run-playwright:
+        description: 'Run Playwright E2E — the slowest job. Callers can gate by event, e.g. ${{ github.event_name != ''push'' }}'
+        required: false
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -380,7 +388,7 @@ jobs:
   playwright-test:
     name: "Playwright (${{ matrix.dir }})"
     needs: detect-stack
-    if: needs.detect-stack.outputs.has_playwright == 'true'
+    if: needs.detect-stack.outputs.has_playwright == 'true' && inputs.run-playwright
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
