@@ -48,7 +48,10 @@ on:
         type: boolean
         default: false
       run-playwright:
-        description: 'Run Playwright E2E — the slowest job. Callers can gate by event, e.g. ${{ github.event_name != ''push'' }}'
+        # NOTE: never put a ${{ }} expression in a description — GitHub evaluates
+        # expressions in the on: block, where the github context is unavailable,
+        # and the whole workflow fails at startup with zero jobs and no logs.
+        description: "Run Playwright E2E — the slowest job. Callers can gate by event, e.g. github.event_name != 'push'"
         required: false
         type: boolean
         default: true
